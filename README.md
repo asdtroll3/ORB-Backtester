@@ -191,3 +191,5 @@ Set `OPEN_REPORT = False` to stop the browser auto-opening.
 
 For research and educational purposes only. This is **not** financial advice, and
 nothing here is a recommendation to trade. Backtested results are hypothetical.
+
+This project was developed with the assistance of AI and is currently still under development, so some features and functionality may change over time.
