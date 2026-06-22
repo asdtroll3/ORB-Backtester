@@ -77,9 +77,6 @@ match this or adjust `load_sessions`):
 - **Bar timestamp = the bar's _start_ time.**
 - Rows may be in any order (the loader sorts them).
 
-⚠️ The price data and the generated `*.html` / `*.csv` files are **git-ignored**
-on purpose, so the repository stays small and free of licensed data.
-
 ---
 
 ## Configuration
@@ -189,7 +186,11 @@ Set `OPEN_REPORT = False` to stop the browser auto-opening.
 
 ## Disclaimer
 
-For research and educational purposes only. This is **not** financial advice, and
+⚠️ For research and educational purposes only. This is **not** financial advice, and
 nothing here is a recommendation to trade. Backtested results are hypothetical.
 
-This project was developed with the assistance of AI and is currently still under development, so some features and functionality may change over time.
+⚠️ This project was developed with the assistance of AI and is currently still under development, so some features and functionality may change over time.
+
+## License
+
+Released under the [MIT License](LICENSE).
