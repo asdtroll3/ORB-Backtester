@@ -483,6 +483,26 @@ def compute_metrics(trades, day_pnls, cfg):
             "romdd": (net_y / mdd_y) if mdd_y > 0 else math.inf,
         })
     m["year_table"] = pd.DataFrame(yr_rows)
+
+    # per-weekday (Mon–Fri) table
+    tdf["dow"] = pd.to_datetime(tdf["date"]).dt.weekday        # Mon=0 .. Sun=6
+    dow_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    dow_rows = []
+    for d in range(5):
+        g = tdf[tdf["dow"] == d]
+        if len(g):
+            w = (g["pnl_usd"] > 0).sum()
+            dow_rows.append({
+                "dow": d, "day": dow_names[d], "trades": len(g),
+                "win_rate": w / len(g) * 100, "net_usd": g["pnl_usd"].sum(),
+                "net_R": g["net_R"].sum(), "expectancy_R": g["net_R"].mean(),
+            })
+        else:
+            dow_rows.append({"dow": d, "day": dow_names[d], "trades": 0,
+                             "win_rate": 0.0, "net_usd": 0.0, "net_R": 0.0,
+                             "expectancy_R": 0.0})
+    m["dow_table"] = pd.DataFrame(dow_rows)
+
     m["trades_df"] = tdf
     return m
 
@@ -655,6 +675,14 @@ def build_text_report(meta, cfg, m, sig, mc, sens) -> str:
           f"{romdd:>8}{rp:>8.1f}%")
     P("")
     P("-" * 78)
+    P("  DAY-OF-WEEK BREAKDOWN  (Mon–Fri)")
+    P("-" * 78)
+    P(f"  {'Day':<11}{'Trades':>8}{'Win%':>8}{'Net $':>14}{'Net R':>9}{'Exp.R/trade':>13}")
+    for _, r in m["dow_table"].iterrows():
+        P(f"  {r['day']:<11}{int(r['trades']):>8}{r['win_rate']:>7.1f}%"
+          f"{r['net_usd']:>14,.0f}{r['net_R']:>9.1f}{r['expectancy_R']:>+13.4f}")
+    P("")
+    P("-" * 78)
     P("  WORST 10 DRAWDOWNS")
     P("-" * 78)
     P(f"  {'#':<3}{'Depth$':>12}{'Depth%':>9}{'Peak':>13}{'Trough':>13}"
@@ -801,6 +829,20 @@ def build_html(text_report, m, mc, sens):
                        showlegend=False), row=1, col=2)
     f.add_hline(y=50, line_dash="dot", line_color="#888", row=1, col=2)
     _layout(f, "Trade Analysis", h=340)
+    figs.append(f)
+
+    # 3c) day-of-week performance
+    dt = m["dow_table"]
+    short = [d[:3] for d in dt["day"]]
+    f = make_subplots(rows=1, cols=2, subplot_titles=("Net P&L by weekday ($)",
+                                                      "Win-rate by weekday (%)"))
+    f.add_trace(go.Bar(x=short, y=dt["net_usd"],
+                       marker_color=["#26a69a" if v >= 0 else "#ef5350" for v in dt["net_usd"]],
+                       showlegend=False), row=1, col=1)
+    f.add_trace(go.Bar(x=short, y=dt["win_rate"], marker_color=ACC,
+                       showlegend=False), row=1, col=2)
+    f.add_hline(y=50, line_dash="dot", line_color="#888", row=1, col=2)
+    _layout(f, "Day-of-Week Performance (Mon–Fri)", h=340)
     figs.append(f)
 
     # 4) Monte-Carlo paths + final-return histogram
