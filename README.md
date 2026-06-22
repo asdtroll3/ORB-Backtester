@@ -174,7 +174,7 @@ report adjusts automatically.
 | `Backtest_Report.html` | Full interactive report (stats + all charts). Auto-opens. |
 | `Backtest_trades.csv` | Every trade: entry/exit, prices, R, contracts, P&L, exit reason. |
 
-Both are git-ignored. Set `OPEN_REPORT = False` to stop the browser auto-opening.
+Set `OPEN_REPORT = False` to stop the browser auto-opening.
 
 ---
 
