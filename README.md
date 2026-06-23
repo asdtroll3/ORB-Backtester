@@ -123,14 +123,28 @@ STARTING_CAPITAL  = 100_000.0
 
 ### Position sizing
 ```python
-RISK_PER_TRADE_USD    = 5000.0  # $ risked per trade (loss if stop is hit)
-USE_VOL_TARGET_SIZING = True    # True  -> size each trade so a stop-out loses
-                                #          exactly RISK_PER_TRADE_USD: wide/volatile
-                                #          days get FEWER contracts, quiet days MORE.
+USE_PCT_EQUITY_RISK   = False   # True  -> risk RISK_PCT_OF_EQUITY of *current* equity
+                                #          per trade (COMPOUNDING): starts at 1% of
+                                #          STARTING_CAPITAL and grows in $ as the
+                                #          account grows. Overrides RISK_PER_TRADE_USD.
+RISK_PCT_OF_EQUITY    = 0.01    # fraction of equity risked per trade (0.01 = 1%)
+
+RISK_PER_TRADE_USD    = 5000.0  # FIXED $ risked per trade (used when the % mode is off)
+USE_VOL_TARGET_SIZING = True    # True  -> size each trade so a stop-out loses the risk
+                                #          budget exactly: wide/volatile days get FEWER
+                                #          contracts, quiet days MORE.
                                 # False -> trade a fixed CONTRACTS every time.
 MAX_CONTRACTS         = 20      # hard cap on contracts per trade
 CONTRACTS             = 1       # used only when USE_VOL_TARGET_SIZING = False
 ```
+
+Three sizing modes, in priority order:
+
+1. **% of equity** (`USE_PCT_EQUITY_RISK = True`) — risk a fixed *fraction* of the
+   running account on each trade. Compounds up as you profit, de-sizes in drawdowns.
+2. **Fixed $** (`USE_VOL_TARGET_SIZING = True`, % mode off) — risk a constant
+   `RISK_PER_TRADE_USD` every trade, sized by stop distance.
+3. **Fixed contracts** (both off) — trade `CONTRACTS` lots regardless of stop distance.
 
 ---
 

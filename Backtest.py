@@ -93,14 +93,24 @@ COMMISSION_RT_USD = 4.20          # commission per round-turn, per contract
 STARTING_CAPITAL  = 100_000.0     # account size used for %-returns / equity curve
 
 # ─────────────────────────── POSITION SIZING ────────────────────────────────
+# Risk per trade can be a FIXED dollar amount, or a PERCENT OF CURRENT EQUITY.
+USE_PCT_EQUITY_RISK   = False     # True  -> risk RISK_PCT_OF_EQUITY of the *current*
+                                  #          equity on every trade (COMPOUNDING): it
+                                  #          starts at 1% of STARTING_CAPITAL and grows
+                                  #          in $ as the account grows (and shrinks in
+                                  #          drawdowns).  Overrides RISK_PER_TRADE_USD.
+                                  # False -> use the fixed RISK_PER_TRADE_USD below.
+RISK_PCT_OF_EQUITY    = 0.01      # fraction of equity risked per trade (0.01 = 1%)
+
 RISK_PER_TRADE_USD    = 5000.0    # $ risked per trade (the loss taken if the stop
                                   # at ORL is hit).  Held constant on every trade.
 USE_VOL_TARGET_SIZING = True      # True  -> Volatility-Target sizing: size each
-                                  #          trade so a stop-out loses exactly
-                                  #          RISK_PER_TRADE_USD.  Wide-range / high-
-                                  #          volatility days (big entry−ORL) get
-                                  #          FEWER contracts; quiet/tight days get
-                                  #          MORE.  The number of TRADES is unchanged.
+                                  #          trade so a stop-out loses exactly the
+                                  #          risk budget (fixed $ or % of equity).
+                                  #          Wide-range / high-volatility days
+                                  #          (big entry−ORL) get FEWER contracts;
+                                  #          quiet/tight days get MORE.  Trade count
+                                  #          is unchanged.
                                   # False -> trade a fixed CONTRACTS on every trade
                                   #          (dollar risk then varies day to day).
 MAX_CONTRACTS         = 20        # hard cap on contracts per trade (both modes)
@@ -229,6 +239,7 @@ def run_backtest(sessions, or_minutes, target_r, cfg):
     comm = cfg.commission_rt
 
     trades, day_pnls = [], {}
+    equity = cfg.starting_capital          # running equity (for % -of-equity sizing)
 
     for s in sessions:
         mins, O, H, L, C = s["min"], s["O"], s["H"], s["L"], s["C"]
@@ -264,13 +275,20 @@ def run_backtest(sessions, or_minutes, target_r, cfg):
         target = theo_entry + target_r * R_pts
 
         # --- position size -----------------------------------------------------
-        # Vol-target: contracts so that a stop-out (R_pts × $/pt × qty) loses
-        # exactly RISK_PER_TRADE_USD -> fewer contracts when R_pts is large
-        # (wide/volatile range), more when R_pts is small (quiet range).
-        if cfg.use_vol_sizing:
+        # The risk budget is either a fixed $ amount or a % of CURRENT equity
+        # (compounding). Vol-target sizing turns that budget into contracts so a
+        # stop-out (R_pts × $/pt × qty) loses exactly the budget -> fewer
+        # contracts on wide/volatile ranges, more on quiet/tight ranges.
+        equity_before = equity
+        if cfg.use_pct_equity_risk:
+            risk_budget = cfg.risk_pct_of_equity * max(equity_before, 0.0)
+            qty = min(risk_budget / (R_pts * pt), cfg.max_contracts)
+        elif cfg.use_vol_sizing:
             qty = min(cfg.risk_per_trade / (R_pts * pt), cfg.max_contracts)
         else:
             qty = min(cfg.contracts, cfg.max_contracts)
+        if qty <= 0:
+            continue                       # no risk budget (ruin) -> skip, stay flat
 
         # --- manage trade on subsequent bars ----------------------------------
         reason = gross_exit = sell_fill = None
@@ -313,6 +331,8 @@ def run_backtest(sessions, or_minutes, target_r, cfg):
         net_R    = pnl_usd / (R_pts * pt * qty)
 
         day_pnls[s["date"]] = pnl_usd
+        ret_frac = pnl_usd / equity_before if equity_before > 0 else 0.0
+        equity += pnl_usd                                  # compound the running equity
         trades.append({
             "date":        s["date"],
             "entry_min":   int(mins[entry_i]) + 5,            # bar-close = entry time
@@ -321,6 +341,7 @@ def run_backtest(sessions, or_minutes, target_r, cfg):
             "entry": theo_entry, "stop": stop, "target": target,
             "exit_price": gross_exit, "reason": reason,
             "gross_R": gross_R, "net_R": net_R, "contracts": qty,
+            "equity_before": equity_before, "ret_frac": ret_frac,
             "pnl_pts": pnl_pts, "pnl_usd": pnl_usd, "pnl_usd_nocost": pnl_usd_nocost,
         })
 
@@ -436,10 +457,16 @@ def compute_metrics(trades, day_pnls, cfg):
     # return on max drawdown = net profit / max drawdown ($)
     m["return_on_dd"] = (m["net_profit"] / m["max_dd_usd"]) if m["max_dd_usd"] > 0 else math.inf
 
-    # daily returns -> Sharpe / Sortino.  Returns are taken on INITIAL capital:
-    # fixed-$ position sizing is additive (not compounded), and this stays well
-    # defined even if aggressive sizing drives equity below zero.
-    dret = dpnl / cfg.starting_capital
+    # daily returns -> Sharpe / Sortino.
+    #  • %-of-equity sizing is COMPOUNDING -> returns on the prior running equity.
+    #  • fixed-$ / fixed-contract sizing is ADDITIVE -> returns on INITIAL capital
+    #    (also robust if aggressive sizing drives equity below zero).
+    compounding = cfg.use_pct_equity_risk
+    if compounding:
+        prev_eq = np.concatenate([[cfg.starting_capital], eq[:-1]])
+        dret = dpnl / prev_eq
+    else:
+        dret = dpnl / cfg.starting_capital
     mu, sd = dret.mean(), dret.std(ddof=1)
     downside = dret[dret < 0]
     dsd = downside.std(ddof=1) if len(downside) > 1 else 0.0
@@ -452,10 +479,16 @@ def compute_metrics(trades, day_pnls, cfg):
     base = eq[-1] / cfg.starting_capital
     m["cagr_pct"] = ((base ** (1 / yrs) - 1) * 100) if base > 0 else -100.0
 
-    # ── monthly & yearly tables (additive % of initial capital) ──────────────
+    # ── monthly & yearly tables ──────────────────────────────────────────────
+    # compounding mode -> geometric link of daily returns; additive -> simple sum.
     rser = pd.Series(dret, index=ts)
-    monthly = rser.resample("ME").sum() * 100
-    yearly  = rser.resample("YE").sum() * 100
+    if compounding:
+        agg = lambda r: (np.prod(1 + r) - 1) * 100
+        monthly = rser.resample("ME").apply(agg)
+        yearly  = rser.resample("YE").apply(agg)
+    else:
+        monthly = rser.resample("ME").sum() * 100
+        yearly  = rser.resample("YE").sum() * 100
     m["monthly_returns"] = monthly
     m["yearly_returns"]  = yearly
 
@@ -541,10 +574,23 @@ def significance(trades, rng):
 # ════════════════════════════════════════════════════════════════════════════
 
 def monte_carlo(trades, cfg, rng):
-    pnl = np.array([t["pnl_usd"] for t in trades], dtype=float)
-    n = len(pnl)
-    sample = rng.choice(pnl, size=(cfg.mc_runs, n), replace=True)
-    eq = cfg.starting_capital + np.cumsum(sample, axis=1)
+    # Resample the trade sequence (with replacement) MC_RUNS times.
+    #  • compounding (%-equity) sizing: resample per-trade RETURN FRACTIONS and
+    #    grow equity multiplicatively, so the path reflects compounding.
+    #  • additive (fixed-$) sizing: resample $ P&L and accumulate.
+    n = len(trades)
+    if cfg.use_pct_equity_risk:
+        rf = np.array([t["ret_frac"] for t in trades], dtype=float)
+        sample = rng.choice(rf, size=(cfg.mc_runs, n), replace=True)
+        eq = cfg.starting_capital * np.cumprod(1 + sample, axis=1)
+        paths = cfg.starting_capital * np.cumprod(
+            1 + sample[:min(cfg.mc_plot_paths, cfg.mc_runs)], axis=1)
+    else:
+        pnl = np.array([t["pnl_usd"] for t in trades], dtype=float)
+        sample = rng.choice(pnl, size=(cfg.mc_runs, n), replace=True)
+        eq = cfg.starting_capital + np.cumsum(sample, axis=1)
+        paths = cfg.starting_capital + np.cumsum(
+            sample[:min(cfg.mc_plot_paths, cfg.mc_runs)], axis=1)
     finals = eq[:, -1]
     run_max = np.maximum.accumulate(eq, axis=1)
     max_dd = ((eq - run_max) / run_max).min(axis=1) * 100      # worst %DD per run
@@ -558,8 +604,7 @@ def monte_carlo(trades, cfg, rng):
         "p95_final": np.percentile(finals, 95),
         "median_dd": np.median(max_dd),
         "p05_dd": np.percentile(max_dd, 5),       # 5th pct = deep DD tail
-        "paths": cfg.starting_capital + np.cumsum(
-            sample[:min(cfg.mc_plot_paths, cfg.mc_runs)], axis=1),
+        "paths": paths,
     }
 
 
@@ -611,7 +656,10 @@ def build_text_report(meta, cfg, m, sig, mc, sens) -> str:
       f"  |  Time-exit {TRADE_EXIT_TIME} NY")
     P(f"  Costs            : {SLIPPAGE_TICKS:g} tick slip/side"
       f"  +  {fmt_money(COMMISSION_RT_USD)}/round-turn   (${POINT_VALUE_USD:g}/pt)")
-    if USE_VOL_TARGET_SIZING:
+    if USE_PCT_EQUITY_RISK:
+        P(f"  Position sizing  : vol-target  {RISK_PCT_OF_EQUITY * 100:g}% of equity/trade"
+          f"  (compounding)  |  cap {MAX_CONTRACTS} contracts")
+    elif USE_VOL_TARGET_SIZING:
         P(f"  Position sizing  : vol-target  {fmt_money(RISK_PER_TRADE_USD)} risk/trade"
           f"  |  cap {MAX_CONTRACTS} contracts")
     else:
@@ -886,6 +934,15 @@ def build_html(text_report, m, mc, sens):
         parts.append(fig.to_html(full_html=False,
                                  include_plotlyjs=("cdn" if i == 0 else False)))
     charts = "".join(f'<div class="chart">{p}</div>' for p in parts)
+
+    # colour the "Return on max drawdown" line red in the HTML (console stays plain)
+    report_html = text_report
+    for ln in text_report.splitlines():
+        if ln.lstrip().startswith("Return on max drawdown"):
+            report_html = report_html.replace(
+                ln, f'<span style="color:#ef5350">{ln}</span>', 1)
+            break
+
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>ORB Backtest Report</title>
 <style>
@@ -898,7 +955,7 @@ def build_html(text_report, m, mc, sens):
  .chart{{background:{BG};border:1px solid {GRID};border-radius:8px;margin:18px 0;}}
 </style></head><body>
 <h1>Opening Range Breakout — NQ 5-min — Backtest Report</h1>
-<pre>{text_report}</pre>
+<pre>{report_html}</pre>
 {charts}
 </body></html>"""
     with open(HTML_REPORT, "w", encoding="utf-8") as fh:
@@ -927,6 +984,7 @@ def main():
         starting_capital=STARTING_CAPITAL, stop_before_target=STOP_BEFORE_TARGET,
         use_vol_sizing=USE_VOL_TARGET_SIZING, risk_per_trade=RISK_PER_TRADE_USD,
         max_contracts=MAX_CONTRACTS,
+        use_pct_equity_risk=USE_PCT_EQUITY_RISK, risk_pct_of_equity=RISK_PCT_OF_EQUITY,
         mc_runs=MC_RUNS, mc_plot_paths=MC_PLOT_PATHS,
     )
 
